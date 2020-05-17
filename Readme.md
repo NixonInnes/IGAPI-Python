@@ -1,5 +1,7 @@
 # IGAPI-Python
-A python client for the [IG API](https://labs.ig.com/rest-trading-api-guide)
+A python client for Version 2 of the [IG API](https://labs.ig.com/rest-trading-api-guide).
+
+**CAUTION**: This is currently a **work in progress**
 
 ## License
 The [IGAPI-Python](https://github.com/NixonInnes/IGAPI-Python) library is provided under [MIT License](https://github.com/NixonInnes/IGAPI-Python/blob/master/License.txt) by James Innes.
