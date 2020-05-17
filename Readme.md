@@ -17,6 +17,13 @@ SOFTWARE.
 ```
 
 ## General
+### Development Roadmap
+1. [ ] Add all v2 endpoints
+    - [x] GET
+    - [ ] POST
+    - [ ] PUT
+    - [ ] DELETE
+2. [ ] Create CLI
 
 ## Installation
 
