@@ -162,16 +162,17 @@ class IGCLI:
         for i, pos in enumerate(positions):
             line = '<{dir_colour}>{direction:4}</{dir_colour}> ' +\
                    '{name:15} {size:3} {currency:3} @ {level:6} ' +\
-                   '|| <{profitloss_colour}>{updown:3} {profitloss:.2f}</{profitloss_colour}>'
-            line = line.format(dir_colour='up' if pos['position']['direction'] == 'BUY' else 'down',
+                   '|| <{profitloss_colour}>{profitloss:10.2f}</{profitloss_colour}>'
+            line = line.format(#dir_colour='up' if pos['position']['direction'] == 'BUY' else 'down',
+                               dir_colour='',
                                direction=pos['position']['direction'],
                                name=pos['market']['instrumentName'],
                                size=pos['position']['size'],
                                currency=pos['position']['currency'],
                                level=pos['position']['level'],
-                               profitloss_colour='up' if pos['profitloss'] > 0 else 'down',
-                               profitloss=pos['profitloss'],
-                               updown='^^^' if pos['profitloss'] > 0 else 'vvv')
+                               #profitloss_colour='up' if pos['profitloss'] > 0 else 'down',
+                               profitloss_colour='',
+                               profitloss=pos['profitloss'])
             #line = to_formatted_text(line, Style.from_dict({'up': '#32CD32',
             #                                                'down': '#FF4500' }))
             buf += line
