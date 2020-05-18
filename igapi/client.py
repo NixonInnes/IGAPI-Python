@@ -1,8 +1,9 @@
 import json
+import logging
 import requests as req
 from datetime import datetime, timedelta
 
-from .utils import status_code_exceptions
+from .exceptions import status_code_exceptions
 
 
 def check_auth(func):
@@ -15,9 +16,11 @@ def check_auth(func):
 
 class IGClient:
     STRF = "%Y-%m-%d %H:%M:%S"
+    cli_hooks = ['authd', 'get_positions']
     def __init__(self, api_key: str, identifier: str, password: str) -> None:
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.__api_key = api_key
-        self.__identifier = identifier
+        self._identifier = identifier
         self.__password = password
         self.__security_token = None
         self.__cst = None
@@ -31,7 +34,7 @@ class IGClient:
         return False
 
     def _get(self, endpoint):
-        print(self.base_url+endpoint)
+        self.logger.debug(f'GET: {self.base_url+endpoint}')
         r = req.get(self.base_url+endpoint, headers=self.get_headers())
         if r.ok:
             return r.json()
@@ -57,7 +60,7 @@ class IGClient:
         return headers
 
     def login(self):
-        data = json.dumps({'identifier':self.__identifier, 'password':self.__password})
+        data = json.dumps({'identifier':self._identifier, 'password':self.__password})
         r = req.post(self.base_url+'/session', headers=self.get_headers(), data=data)
         if r.ok:
             self.__security_token = r.headers['X-SECURITY-TOKEN']
