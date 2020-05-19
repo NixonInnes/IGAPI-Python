@@ -3,6 +3,7 @@ from __future__ import unicode_literals
 import os
 import logging
 import time
+import yaml
 from prompt_toolkit import Application
 from prompt_toolkit.layout.containers import VSplit, HSplit, Window
 from prompt_toolkit.layout.layout import Layout
@@ -13,6 +14,7 @@ from prompt_toolkit.document import Document
 from threading import Thread, Event, get_ident
 
 from .client import IGClient
+from .utils import req_auth
 
 # Fix for Windows ##################
 import asyncio
@@ -25,14 +27,26 @@ asyncio.set_event_loop(loop)
 logging.basicConfig(filename='log.txt',
                     level=logging.DEBUG,
                     format='%(asctime)s %(name)s:%(levelname)s:%(message)s')
+
 stop_threads = Event()
 
+DEFAULT_REFRESH = 5
+
+
 class RepeatTimer(Thread):
+    """Timer thread to run every 'interval' seconds.
+
+    args:
+    func -- function to call each loop
+
+    kwargs:
+    interval -- (default: 5) time between each function call (in seconds)
+    """
     def __init__(self, func, interval=5):
         Thread.__init__(self)
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.debug(f'{get_ident()}: Created')
-        self.interval = interval
+        self.interval = int(interval)
         self.func = func
 
     def run(self):
@@ -46,18 +60,15 @@ class IGCLI:
     kb = KeyBindings()
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.authd = False
+        self.config_file = os.getenv('IG_CLI_CONFIG', 'config.yml')
+        self.config = {}
         self.__api_key = os.getenv('IG_API_KEY')
         self._id = os.getenv('IG_ID')
         self.__password = os.getenv('IG_PWD')
         self._stop_update = Event()
-        if self.__api_key and self._id and self.__password:
-            self.client = IGClient(self.__api_key, self._id, self.__password)
-            self.authd = True
-            self.update_thread = RepeatTimer(self.update_positions)
-        else:
-            self.client = None
-            self.update_thread = None
+        self.client = None
+        self.positions_thread = None
+        self.trackers_thread = None
 
         self.style = Style([
             ('output-field', 'bg:#5F9EA0 #F0FFFF'),
@@ -66,21 +77,18 @@ class IGCLI:
             ('status-bar', 'bg:#D3D3D3 #2F4F4F')
         ])
 
-        self.lhs_output_field = TextArea(style='class:output-field')
-
-        self.rhs_output_field = TextArea(style='class:output-field')
-
-        self.logging_field = TextArea(height=7, style='class:output-field')
+        self.trackers_field = TextArea(style='class:output-field')
+        self.positions_field = TextArea(style='class:output-field')
+        self.msg_field = TextArea(height=7, style='class:output-field')
 
         self.output_container = HSplit([
-               VSplit([self.lhs_output_field,
+               VSplit([self.trackers_field,
                        Window(width=1, char='|', style='class:separator'),
-                       self.rhs_output_field]),
+                       self.positions_field]),
                Window(height=1, char='-', style='class:separator'),
-               self.logging_field])
+               self.msg_field])
 
         self.search_field = SearchToolbar()
-
         self.input_field = TextArea(height=1,
                                     prompt='>>> ',
                                     style='class:input-field',
@@ -108,7 +116,35 @@ class IGCLI:
                                full_screen=True,
                                mouse_support=True,
                                key_bindings=self.kb)
+        self.autologin()
 
+    @req_auth
+    def load_config(self, filename='config.yml'):
+        self.msg_out(f'Loading {self._id} configuration...')
+        with open(filename) as f:
+            loaded = yaml.safe_load(f)
+        self.config = loaded.get(self._id, {})
+        # Set some defaults
+        if 'refresh' not in self.config:
+            self.config['refresh'] = DEFAULT_REFRESH
+        if 'tracked' not in self.config:
+            self.config['tracked'] = []
+        self.msg_out(f'... Refresh rate {self.refresh} s\n'
+                     f'... Added {len(self.tracked)} trackers')
+
+    @property
+    def authd(self):
+        if self.__api_key and self._id and self.__password:
+            return True
+        return False
+
+    @property
+    def refresh(self):
+        return self.config.get('refresh')
+
+    @property
+    def tracked(self):
+        return self.config.get('tracked')
 
     @property
     def status(self):
@@ -119,6 +155,75 @@ class IGCLI:
             s += f'Online | ID: {self._id}'
         return s
 
+    def autologin(self):
+        api_key = os.getenv('IG_API_KEY')
+        identifier = os.getenv('IG_ID')
+        password = os.getenv('IG_PWD')
+        if api_key and identifier and password:
+            self.login(api_key, identifier, password)
+
+    def login(self, api_key, identifier, password):
+        self.__api_key = api_key
+        self._id = identifier
+        self.__password = password
+        self.load_config()
+        self.start_client()
+        self.start_threads()
+
+    @req_auth
+    def logout(self):
+        self.__api_key = None
+        self._id = None
+        self.__password = None
+        self.config = {}
+        self.stop_treads()
+
+    @req_auth
+    def start_client(self):
+        global stop_threads
+        if stop_threads is None:
+            stop_threads = Event()
+        self.client = IGClient(self.__api_key, self._id, self.__password)
+
+    @req_auth
+    def start_threads(self):
+        if self.positions_thread and self.trackers_thread:
+            self.logger.error('Threads already exist!')
+            return
+
+        # Reset stop _threads if needed
+        global stop_threads
+        if stop_threads is None:
+            stop_threads = Event()
+
+        self.positions_thread = RepeatTimer(self.update_positions,
+                                            self.refresh)
+        self.trackers_thread = RepeatTimer(self.update_trackers,
+                                           self.refresh)
+
+        self.positions_thread.start()
+        self.trackers_thread.start()
+
+    @req_auth
+    def stop_threads(self):
+        global stop_threads
+        stop_threads.set()
+        self.positions_thread = None
+        self.trackers_thread = None
+        stop_threads = None
+
+    @req_auth
+    def restart_threads(self):
+        self.stop_threads()
+        self.start_threads()
+
+    @req_auth
+    def write_config(self):
+        with open(self.config_file, 'r') as f:
+            loaded = yaml.safe_load(f)
+        loaded[self._id] = self.config
+        with open(self.config_file, 'w') as f:
+            yaml.dumps(loaded, f)
 
     def parse(self, buf):
         self.logger.debug(f'Input: {buf.text}')
@@ -126,33 +231,28 @@ class IGCLI:
         if args:
             if args[0] == 'api':
                 self.set_api(args[1:])
-                self.append_logging('Added api key')
+                self.output('Added api key')
             elif args[0] == 'config':
                 self.config()
             elif args[0] == 'update':
                 self.update_positions()
+                self.update_trackers()
             else:
                 if args[0] in self.client.cli_hooks:
-                    self.append_logging(str(getattr(self.client, args[0])()))
+                    self.msg_out(str(getattr(self.client, args[0])()))
                 else:
-                    self.append_logging('Unrecognised command: ' + buf.text)
+                    self.msg_out('Unrecognised command: ' + buf.text)
 
-
-    def append_logging(self, text):
-        new_text = self.logging_field.text + f'\n{text}'
-        self.logging_field.buffer.document = \
+    def msg_out(self, text):
+        new_text = self.msg_field.text + f'\n{text}'
+        self.msg_field.buffer.document = \
             Document(text=new_text, cursor_position=len(new_text))
-
-
-    def set_api(self, api_key):
-        self.__api_key = api_key
 
     # this doesn't work, need to figure out how to pop-up dialogs
     # with Application
     def config(self):
         api = Dialog(title='API',
                      body='Please enter your API key:')
-
 
     # cant figure out how to colour text for the Document
     def update_positions(self):
@@ -178,10 +278,24 @@ class IGCLI:
             buf += line
             if i+1 != len(positions): #not last
                 buf += '\n'
+        self.positions_field.buffer.document = Document(text=buf)
 
-        self.rhs_output_field.buffer.document = \
-            Document(text=buf)
-
+    @req_auth
+    def update_trackers(self):
+        self.logger.debug('Updating trackers...')
+        markets = self.client.get_markets(*self.tracked)['marketDetails']
+        buf = ''
+        for i, market in enumerate(markets):
+            line = '{name:15} || {low:6} | {high:6} || {bid:>6} | {offer:6}'
+            line = line.format(name=market['instrument']['name'],
+                               low=market['snapshot']['low'],
+                               high=market['snapshot']['high'],
+                               bid=market['snapshot']['bid'],
+                               offer=market['snapshot']['offer'])
+            buf += line
+            if i+1 != len(self.config['tracked']):
+                buf += '\n'
+        self.trackers_field.buffer.document = Document(text=buf)
 
     # This does some super weird shit. The decorator calls this
     # without passing self. I'm too dumb to figure out where/how this
@@ -195,13 +309,9 @@ class IGCLI:
         stop_threads.set()
         event.app.exit()
 
-
     def __call__(self):
         self.logger.info('Starting CLI...')
-        if self.authd:
-            self.update_thread.start()
         self.app.run()
 
-
     def __del__(self):
-        self._stop_update.set()
+        self.stop_threads()

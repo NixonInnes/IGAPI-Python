@@ -33,9 +33,11 @@ class IGClient:
             return True
         return False
 
-    def _get(self, endpoint):
+    def _get(self, endpoint, params={}):
         self.logger.debug(f'GET: {self.base_url+endpoint}')
-        r = req.get(self.base_url+endpoint, headers=self.get_headers())
+        r = req.get(self.base_url+endpoint,
+                    params=params,
+                    headers=self.get_headers())
         if r.ok:
             return r.json()
         try:
@@ -96,8 +98,8 @@ class IGClient:
         return self._get('/workingorders')
 
     @check_auth
-    def get_markets(self):
-        return self._get('/markets')
+    def get_markets(self, *args):
+        return self._get('/markets', params={'epics':','.join(args)})
 
     @check_auth
     def get_market(self, epic):
