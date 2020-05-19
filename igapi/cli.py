@@ -4,6 +4,7 @@ import os
 import logging
 import time
 import yaml
+from datetime import datetime
 from prompt_toolkit import Application
 from prompt_toolkit.layout.containers import VSplit, HSplit, Window
 from prompt_toolkit.layout.layout import Layout
@@ -58,6 +59,7 @@ class RepeatTimer(Thread):
 
 class IGCLI:
     kb = KeyBindings()
+    strf_string = '%a %d %b %Y - %H:%M:%S'
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.config_file = os.getenv('IG_CLI_CONFIG', 'config.yml')
@@ -69,6 +71,7 @@ class IGCLI:
         self.client = None
         self.positions_thread = None
         self.trackers_thread = None
+        self.status_thread = None
 
         self.style = Style([
             ('output-field', 'bg:#5F9EA0 #F0FFFF'),
@@ -98,17 +101,22 @@ class IGCLI:
 
         self.input_field.accept_handler = self.parse
 
-        self.status_bar = TextArea(height=1,
+        self.status_field = TextArea(height=1,
                                    style='class:status-bar',
                                    multiline=False,
                                    wrap_lines=False,
                                    text=self.status)
+        self.time_field = TextArea(height=1,
+                                   style='class:status-bar',
+                                   multiline=False,
+                                   wrap_lines=False,
+                                   text=self.get_time())
 
         self.container = HSplit([self.output_container,
                                 Window(height=1, char='-', style='class:separator'),
                                 self.input_field,
                                 self.search_field,
-                                self.status_bar])
+                                self.status_field])
 
         self.app = Application(Layout(self.container,
                                       focused_element=self.input_field),
@@ -117,6 +125,9 @@ class IGCLI:
                                mouse_support=True,
                                key_bindings=self.kb)
         self.autologin()
+
+    def get_time(self):
+        return datetime.utcnow().strftime(self.strf_string)
 
     @req_auth
     def load_config(self, filename='config.yml'):
@@ -148,12 +159,18 @@ class IGCLI:
 
     @property
     def status(self):
-        s = 'Status | '
+        s = self.get_time()
+        s += ' || Status | '
         if not self.authd:
             s += 'Offline |'
         else:
-            s += f'Online | ID: {self._id}'
+            s += f'Online | ID: {self._id} '
+
         return s
+
+    def update_status(self):
+        self.status_field.buffer.document = Document(text=self.status)
+
 
     def autologin(self):
         api_key = os.getenv('IG_API_KEY')
@@ -200,9 +217,12 @@ class IGCLI:
                                             self.refresh)
         self.trackers_thread = RepeatTimer(self.update_trackers,
                                            self.refresh)
+        self.status_thread = RepeatTimer(self.update_status,
+                                         1)
 
         self.positions_thread.start()
         self.trackers_thread.start()
+        self.status_thread.start()
 
     @req_auth
     def stop_threads(self):
