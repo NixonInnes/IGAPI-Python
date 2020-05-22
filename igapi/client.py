@@ -115,12 +115,15 @@ class IGClient:
     def get_positions_profitloss(self):
         positions = self.get_positions()['positions']
         for position in positions:
-            if position['position']['direction'] == 'BUY':
-                position['profitloss'] = position['market']['bid'] -\
-                    position['position']['level']
-            elif position['position']['direction'] == 'SELL':
-                position['profitloss'] = position['position']['level'] -\
-                    position['market']['offer']
+            if position['market']['marketStatus'] == 'CLOSED':
+                position['profitloss'] = '-'
+            else:
+                if position['position']['direction'] == 'BUY':
+                    position['profitloss'] = position['market']['bid'] -\
+                            position['position']['level']
+                elif position['position']['direction'] == 'SELL':
+                    position['profitloss'] = position['position']['level'] -\
+                        position['market']['offer']
         return positions
 
     @check_auth

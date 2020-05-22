@@ -16,6 +16,7 @@ from threading import Thread, Event, get_ident
 
 from .client import IGClient
 from .utils import req_auth
+from .exceptions import NotFoundError
 
 # Fix for Windows ##################
 import asyncio
@@ -60,6 +61,11 @@ class RepeatTimer(Thread):
 class IGCLI:
     kb = KeyBindings()
     strf_string = '%a %d %b %Y | %H:%M:%S'
+    config_default = {
+        'refresh': 5,
+        'currency': 'USD',
+        'tracked': []
+    }
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.config_file = os.getenv('IG_CLI_CONFIG', 'config.yml')
@@ -69,6 +75,7 @@ class IGCLI:
         self._stop_update = Event()
         self.client = None
         self.positions_thread = None
+        self.activity_thread = None
         self.orders_thread = None
         self.trackers_thread = None
         self.status_thread = RepeatTimer(self.update_status, 1)
@@ -83,6 +90,7 @@ class IGCLI:
         self.trackers_field = TextArea(style='class:output-field')
         self.positions_field = TextArea(style='class:output-field')
         self.orders_field = TextArea(style='class:output-field')
+        self.activity_field = TextArea(height=7, style='class:output-field')
         self.msg_field = TextArea(height=7, style='class:output-field')
 
         self.output_container = HSplit([
@@ -93,7 +101,10 @@ class IGCLI:
                               self.orders_field])
                        ]),
                Window(height=1, char='-', style='class:separator'),
-               self.msg_field])
+               VSplit([self.msg_field,
+                      Window(width=1, char='|', style='class:separator'),
+                      self.activity_field])
+               ])
 
         self.search_field = SearchToolbar()
         self.input_field = TextArea(height=1,
@@ -141,28 +152,20 @@ class IGCLI:
             loaded = yaml.safe_load(f)
         if loaded:
             self.config = loaded.get(self._id, {})
+            if self.config:
+                for key, default in self.config_default.items():
+                    if key not in self.config:
+                        self.config[key] = default
         else:
-            self.config = {}
-        # Set some defaults
-        if 'refresh' not in self.config:
-            self.config['refresh'] = DEFAULT_REFRESH
-        if 'tracked' not in self.config:
-            self.config['tracked'] = []
-        self.msg_out(f'... Refresh rate {self.refresh} s\n'
-                     f'... Added {len(self.tracked)} trackers')
-
-    @property
-    def refresh(self):
-        return self.config.get('refresh')
-
-    @property
-    def tracked(self):
-        return self.config.get('tracked')
+            self.config = self.config_default.copy()
+        self.msg_out(f'... Refresh rate: {self.config["refresh"]} s\n'
+                     f'... Currency: {self.config["currency"]}\n'
+                     f'... Added {len(self.config["tracked"])} trackers')
 
     @property
     def status(self):
         s = self.get_time()
-        s += ' || Status | '
+        s += ' || Status: '
         if not self.authd:
             s += 'Offline |'
         else:
@@ -213,13 +216,16 @@ class IGCLI:
             stop_threads = Event()
 
         self.positions_thread = RepeatTimer(self.update_positions,
-                                            self.refresh)
+                                            self.config['refresh'])
+        self.activity_thread = RepeatTimer(self.update_activity,
+                                           self.config['refresh'])
         self.orders_thread = RepeatTimer(self.update_orders,
-                                            self.refresh)
+                                         self.config['refresh'])
         self.trackers_thread = RepeatTimer(self.update_trackers,
-                                           self.refresh)
+                                           self.config['refresh'])
 
         self.positions_thread.start()
+        self.activity_thread.start()
         self.orders_thread.start()
         self.trackers_thread.start()
 
@@ -228,6 +234,7 @@ class IGCLI:
         global stop_threads
         stop_threads.set()
         self.positions_thread = None
+        self.activity_thread = None
         self.orders_thread = None
         self.trackers_thread = None
         stop_threads = None
@@ -249,7 +256,11 @@ class IGCLI:
 
     @req_auth
     def add_tracker(self, tracker):
-        self.config['tracked'].append(tracker)
+        try:
+            self.client.get_market(tracker)
+            self.config['tracked'].append(tracker)
+        except NotFoundError:
+            self.msg_out(f'Unable to find market: {tracker}')
 
     @req_auth
     def del_tracker(self, tracker):
@@ -280,7 +291,7 @@ class IGCLI:
         buf = f"{' POSITIONS ':-^60}\n"
         for i, pos in enumerate(positions):
             line = '{direction:4} {name:15} {size:>5.2f} {currency:3} @ {level:>10.2f} ' +\
-                   '|| {profitloss:>10.2f}'
+                   '|| {profitloss:>10}'
             line = line.format(direction=pos['position']['direction'],
                                name=pos['market']['instrumentName'],
                                size=pos['position']['size'],
@@ -291,6 +302,26 @@ class IGCLI:
             if i+1 != len(positions): #not last
                 buf += '\n'
         self.positions_field.buffer.document = Document(text=buf)
+
+    @req_auth
+    def update_activity(self):
+        self.logger.debug('Updating activity...')
+        activities = self.client.get_activity()['activities']
+        buf = ''
+        for i, activity in enumerate(activities):
+            line = '{date} {activity:15} {name:10} {size:>5} {currency:3} @ {level:>10} ' +\
+                   '|| {status:>10}'
+            line = line.format(date=activity['date'],
+                               activity=activity['activity'],
+                               name=activity['marketName'],
+                               size=activity['size'],
+                               currency=activity['currency'],
+                               level=activity['level'],
+                               status=activity['actionStatus'])
+            buf += line
+            if i+1 != len(activities): #not last
+                buf += '\n'
+        self.activity_field.buffer.document = Document(text=buf)
 
     @req_auth
     def update_orders(self):
@@ -312,15 +343,15 @@ class IGCLI:
     @req_auth
     def update_trackers(self):
         self.logger.debug('Updating trackers...')
-        markets = self.client.get_markets(*self.tracked)['marketDetails']
+        markets = self.client.get_markets(*self.config['tracked'])['marketDetails']
         buf = f"{' TRACKERS ':-^60}\n"
         for i, market in enumerate(markets):
-            line = '{name:15} || {low:>9.2f} | {high:>9.2f} || {bid:>9.2f} | {offer:>9.2f}'
+            line = '{name:15} || {low:>9} | {high:>9} || {bid:>9} | {offer:>9}'
             line = line.format(name=market['instrument']['name'],
-                               low=market['snapshot']['low'],
-                               high=market['snapshot']['high'],
-                               bid=market['snapshot']['bid'],
-                               offer=market['snapshot']['offer'])
+                               low=market['snapshot']['low'] or '-',
+                               high=market['snapshot']['high'] or '-',
+                               bid=market['snapshot']['bid'] or '-',
+                               offer=market['snapshot']['offer'] or '-')
             buf += line
             if i+1 != len(self.config['tracked']):
                 buf += '\n'
@@ -394,5 +425,16 @@ class IGCLI:
                         for market in markets])
         self.msg_out(s)
 
+    def _cmd__buy(self, *args):
+        size, epic = args
+        currency = self.config['currency']
+        try:
+            self.client.get_market(epic)
+        except BadRequestError:
+            self.msg_out(f'Unable to find market: {epic}')
+            return
+        self.client.add_position('BUY', 'MARKET', epic,
+                                 size, currency)
+        self.msg_out(f'Submitted position on {epic} @ {size} {currency}')
 
 
