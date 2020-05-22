@@ -17,11 +17,10 @@ def check_auth(func):
 class IGClient:
     STRF = "%Y-%m-%d %H:%M:%S"
     cli_hooks = ['authd', 'get_positions']
-    def __init__(self, api_key: str, identifier: str, password: str) -> None:
+    def __init__(self, api_key: str) -> None:
         self.logger = logging.getLogger(self.__class__.__name__)
         self.__api_key = api_key
-        self._identifier = identifier
-        self.__password = password
+        self._id = None
         self.__security_token = None
         self.__cst = None
 
@@ -43,7 +42,6 @@ class IGClient:
                     headers=headers)
         if r.ok:
             return r.json()
-        return r
         try:
             msg = r.json()["errorCode"]
             E = status_code_exceptions.get(r.status_code, Exception)
@@ -65,7 +63,6 @@ class IGClient:
                                  headers=headers)
         if r.ok:
             return r.json()
-        return r
         try:
             msg = r.json()["errorCode"]
             E = status_code_exceptions.get(r.status_code, Exception)
@@ -98,12 +95,18 @@ class IGClient:
             headers['CST'] = self.__cst
         return headers
 
-    def login(self):
-        data = json.dumps({'identifier':self._identifier, 'password':self.__password})
+    def login(self, identifier, password):
+        data = json.dumps({'identifier':identifier, 'password':password})
         r = req.post(self.base_url+'/session', headers=self.get_headers(), data=data)
         if r.ok:
             self.__security_token = r.headers['X-SECURITY-TOKEN']
             self.__cst = r.headers['CST']
+            self._id = identifier
+            return True
+        return False
+
+    def get_accounts(self):
+        return self.get('/accounts', version=1)
 
     @check_auth
     def get_positions(self):
@@ -220,6 +223,10 @@ class IGClient:
     @check_auth
     def get_market(self, epic):
         return self.get(f'/markets/{epic}')
+
+    @check_auth
+    def search_market(self, term):
+        return self.get('/markets', params={'searchTerm':term}, version=1)
 
     @check_auth
     def get_prices(self, epic, resolution='DAY', num_points=100):

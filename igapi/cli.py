@@ -53,25 +53,25 @@ class RepeatTimer(Thread):
     def run(self):
         self.logger.debug(f'{get_ident()}: Running...')
         while not stop_threads.wait(self.interval):
-            self.logger.debug(f'{get_ident()}: Updating...')
+            #self.logger.debug(f'{get_ident()}: Updating...')
             self.func()
 
 
 class IGCLI:
     kb = KeyBindings()
-    strf_string = '%a %d %b %Y - %H:%M:%S'
+    strf_string = '%a %d %b %Y | %H:%M:%S'
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.config_file = os.getenv('IG_CLI_CONFIG', 'config.yml')
         self.config = {}
-        self.__api_key = os.getenv('IG_API_KEY')
-        self._id = os.getenv('IG_ID')
-        self.__password = os.getenv('IG_PWD')
+        self._id = None
+        self.authd = False
         self._stop_update = Event()
         self.client = None
         self.positions_thread = None
+        self.orders_thread = None
         self.trackers_thread = None
-        self.status_thread = None
+        self.status_thread = RepeatTimer(self.update_status, 1)
 
         self.style = Style([
             ('output-field', 'bg:#5F9EA0 #F0FFFF'),
@@ -82,12 +82,16 @@ class IGCLI:
 
         self.trackers_field = TextArea(style='class:output-field')
         self.positions_field = TextArea(style='class:output-field')
+        self.orders_field = TextArea(style='class:output-field')
         self.msg_field = TextArea(height=7, style='class:output-field')
 
         self.output_container = HSplit([
-               VSplit([self.trackers_field,
+               VSplit([self.positions_field,
                        Window(width=1, char='|', style='class:separator'),
-                       self.positions_field]),
+                       HSplit([self.trackers_field,
+                              Window(height=1, char='-', style='class:separator'),
+                              self.orders_field])
+                       ]),
                Window(height=1, char='-', style='class:separator'),
                self.msg_field])
 
@@ -125,6 +129,7 @@ class IGCLI:
                                mouse_support=True,
                                key_bindings=self.kb)
         self.autologin()
+        self.status_thread.start()
 
     def get_time(self):
         return datetime.utcnow().strftime(self.strf_string)
@@ -134,7 +139,10 @@ class IGCLI:
         self.msg_out(f'Loading {self._id} configuration...')
         with open(filename) as f:
             loaded = yaml.safe_load(f)
-        self.config = loaded.get(self._id, {})
+        if loaded:
+            self.config = loaded.get(self._id, {})
+        else:
+            self.config = {}
         # Set some defaults
         if 'refresh' not in self.config:
             self.config['refresh'] = DEFAULT_REFRESH
@@ -142,12 +150,6 @@ class IGCLI:
             self.config['tracked'] = []
         self.msg_out(f'... Refresh rate {self.refresh} s\n'
                      f'... Added {len(self.tracked)} trackers')
-
-    @property
-    def authd(self):
-        if self.__api_key and self._id and self.__password:
-            return True
-        return False
 
     @property
     def refresh(self):
@@ -165,27 +167,31 @@ class IGCLI:
             s += 'Offline |'
         else:
             s += f'Online | ID: {self._id} '
-
         return s
 
     def update_status(self):
         self.status_field.buffer.document = Document(text=self.status)
-
 
     def autologin(self):
         api_key = os.getenv('IG_API_KEY')
         identifier = os.getenv('IG_ID')
         password = os.getenv('IG_PWD')
         if api_key and identifier and password:
+            self.set_api(api_key)
             self.login(api_key, identifier, password)
 
-    def login(self, api_key, identifier, password):
-        self.__api_key = api_key
-        self._id = identifier
-        self.__password = password
-        self.load_config()
-        self.start_client()
-        self.start_threads()
+    def set_api(self, api_key):
+        self.client = IGClient(api_key=api_key)
+
+    def login(self, identifier, password):
+        successful = self.client.login(identifier, password)
+        if successful:
+            self.authd = True
+            self._id = identifier
+            self.load_config()
+            self.start_threads()
+            return True
+        return False
 
     @req_auth
     def logout(self):
@@ -196,16 +202,9 @@ class IGCLI:
         self.stop_treads()
 
     @req_auth
-    def start_client(self):
-        global stop_threads
-        if stop_threads is None:
-            stop_threads = Event()
-        self.client = IGClient(self.__api_key, self._id, self.__password)
-
-    @req_auth
     def start_threads(self):
         if self.positions_thread and self.trackers_thread:
-            self.logger.error('Threads already exist!')
+            self.logger.error('Threads already running!')
             return
 
         # Reset stop _threads if needed
@@ -215,20 +214,21 @@ class IGCLI:
 
         self.positions_thread = RepeatTimer(self.update_positions,
                                             self.refresh)
+        self.orders_thread = RepeatTimer(self.update_orders,
+                                            self.refresh)
         self.trackers_thread = RepeatTimer(self.update_trackers,
                                            self.refresh)
-        self.status_thread = RepeatTimer(self.update_status,
-                                         1)
 
         self.positions_thread.start()
+        self.orders_thread.start()
         self.trackers_thread.start()
-        self.status_thread.start()
 
     @req_auth
     def stop_threads(self):
         global stop_threads
         stop_threads.set()
         self.positions_thread = None
+        self.orders_thread = None
         self.trackers_thread = None
         stop_threads = None
 
@@ -241,72 +241,81 @@ class IGCLI:
     def write_config(self):
         with open(self.config_file, 'r') as f:
             loaded = yaml.safe_load(f)
+        if not loaded:
+            loaded = {}
         loaded[self._id] = self.config
         with open(self.config_file, 'w') as f:
-            yaml.dumps(loaded, f)
+            yaml.dump(loaded, f)
+
+    @req_auth
+    def add_tracker(self, tracker):
+        self.config['tracked'].append(tracker)
+
+    @req_auth
+    def del_tracker(self, tracker):
+        if tracker in self.config['tracked']:
+            self.config['tracked'].remove(tracker)
 
     def parse(self, buf):
         self.logger.debug(f'Input: {buf.text}')
         args = buf.text.split()
-        if args:
-            if args[0] == 'api':
-                self.set_api(args[1:])
-                self.output('Added api key')
-            elif args[0] == 'config':
-                self.config()
-            elif args[0] == 'update':
-                self.update_positions()
-                self.update_trackers()
-            else:
-                if args[0] in self.client.cli_hooks:
-                    self.msg_out(str(getattr(self.client, args[0])()))
-                else:
-                    self.msg_out('Unrecognised command: ' + buf.text)
+        try:
+            command = getattr(self, f'_cmd__{args[0]}')
+        except AttributeError:
+            self.msg_out(f'Unrecognised command: {args[0]}')
+        finally:
+            command(*args[1:])
 
     def msg_out(self, text):
         new_text = self.msg_field.text + f'\n{text}'
         self.msg_field.buffer.document = \
             Document(text=new_text, cursor_position=len(new_text))
 
-    # this doesn't work, need to figure out how to pop-up dialogs
-    # with Application
-    def config(self):
-        api = Dialog(title='API',
-                     body='Please enter your API key:')
 
     # cant figure out how to colour text for the Document
+    @req_auth
     def update_positions(self):
         self.logger.debug('Updating positions...')
         positions = self.client.get_positions_profitloss()
-        buf = ''
+        buf = f"{' POSITIONS ':-^60}\n"
         for i, pos in enumerate(positions):
-            line = '<{dir_colour}>{direction:4}</{dir_colour}> ' +\
-                   '{name:15} {size:3} {currency:3} @ {level:6} ' +\
-                   '|| <{profitloss_colour}>{profitloss:10.2f}</{profitloss_colour}>'
-            line = line.format(#dir_colour='up' if pos['position']['direction'] == 'BUY' else 'down',
-                               dir_colour='',
-                               direction=pos['position']['direction'],
+            line = '{direction:4} {name:15} {size:>5.2f} {currency:3} @ {level:>10.2f} ' +\
+                   '|| {profitloss:>10.2f}'
+            line = line.format(direction=pos['position']['direction'],
                                name=pos['market']['instrumentName'],
                                size=pos['position']['size'],
                                currency=pos['position']['currency'],
                                level=pos['position']['level'],
-                               #profitloss_colour='up' if pos['profitloss'] > 0 else 'down',
-                               profitloss_colour='',
                                profitloss=pos['profitloss'])
-            #line = to_formatted_text(line, Style.from_dict({'up': '#32CD32',
-            #                                                'down': '#FF4500' }))
             buf += line
             if i+1 != len(positions): #not last
                 buf += '\n'
         self.positions_field.buffer.document = Document(text=buf)
 
     @req_auth
+    def update_orders(self):
+        self.logger.debug('Updating orders...')
+        orders = self.client.get_working_orders()['workingOrders']
+        buf = f"{' ORDERS ':-^60}\n"
+        for i, order in enumerate(orders):
+            line = '{direction:4} {name:15} {size:>5.2f} {currency:3} @ {level:>10.2f} '
+            line = line.format(direction=order['workingOrderData']['direction'],
+                               name=order['marketData']['instrumentName'],
+                               size=order['workingOrderData']['orderSize'],
+                               currency=order['workingOrderData']['currencyCode'],
+                               level=order['workingOrderData']['orderLevel'])
+            buf += line
+            if i+1 != len(orders): #not last
+                buf += '\n'
+        self.orders_field.buffer.document = Document(text=buf)
+
+    @req_auth
     def update_trackers(self):
         self.logger.debug('Updating trackers...')
         markets = self.client.get_markets(*self.tracked)['marketDetails']
-        buf = ''
+        buf = f"{' TRACKERS ':-^60}\n"
         for i, market in enumerate(markets):
-            line = '{name:15} || {low:6} | {high:6} || {bid:>6} | {offer:6}'
+            line = '{name:15} || {low:>9.2f} | {high:>9.2f} || {bid:>9.2f} | {offer:>9.2f}'
             line = line.format(name=market['instrument']['name'],
                                low=market['snapshot']['low'],
                                high=market['snapshot']['high'],
@@ -335,3 +344,55 @@ class IGCLI:
 
     def __del__(self):
         self.stop_threads()
+
+
+    ## User Commands
+    # all user commands should start with '_cmd__', and accept *args
+    @req_auth
+    def _cmd__update(self, *args):
+        self.update_positions()
+        self.update_orders()
+        self.update_trackers()
+        self.msg_out('Updated positions, orders and trackers')
+
+    def _cmd__api(self, *args):
+        if len(args) != 1:
+            self.msg_out('Invalid syntax, expected: api <key>')
+            return
+        self.set_api(args[0])
+        self.msg_out('Updated API key')
+
+    def _cmd__login(self, *args):
+        if len(args) != 2:
+            self.msg_out('Invalid syntax, expected: login: <username> <password>')
+            return
+        username, password = args
+        successful = self.login(username, password)
+        if successful:
+            self.msg_out('Login successful')
+        else:
+            self.msg_out('Login failed')
+
+    def _cmd__save(self, *args):
+        self.write_config()
+        self.msg_out('Configuration saved')
+
+    def _cmd__track(self, *args):
+        for arg in args:
+            self.add_tracker(arg)
+        self.msg_out('Added tracked market(s)')
+
+    def _cmd__stoptrack(self, *args):
+        for arg in args:
+            self.del_tracker(arg)
+        self.msg_out('Removed tracked market(s)')
+
+    def _cmd__search(self, *args):
+        markets = self.client.search_market(args[0])['markets']
+        s = 'Found epics: '
+        s += ', '.join([f'{market["instrumentName"]}: {market["epic"]}'\
+                        for market in markets])
+        self.msg_out(s)
+
+
+
