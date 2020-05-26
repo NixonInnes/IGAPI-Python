@@ -22,7 +22,6 @@ def check_auth(func: Callable) -> Callable:
 
 class IGClient:
     STRF: str = "%Y-%m-%d %H:%M:%S"
-    cli_hooks: List[str] = ['authd', 'get_positions']
 
     def __init__(self, api_key: str, demo: bool = False) -> None:
         self.logger = logging.getLogger(self.__class__.__name__)
