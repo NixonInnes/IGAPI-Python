@@ -1,3 +1,3 @@
 from .client import IGClient
-from .cli import IGCLI
 
+__all__ = [IGClient]

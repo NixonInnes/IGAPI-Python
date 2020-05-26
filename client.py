@@ -1,13 +1,18 @@
+import os
 import json
 import logging
 import requests as req
 from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, List, Union
 
 from .exceptions import status_code_exceptions
 
+JSONType = Union[List[str, int, float, list, dict, datetime],
+                 Dict[str, Union[str, int, float, list, dict, datetime]]]
 
-def check_auth(func):
-    def wrapper(self, *args, **kwargs):
+
+def check_auth(func: Callable) -> Callable:
+    def wrapper(self, *args: List, **kwargs: Dict) -> Any:
         if not self.authd:
             self.login()
         return func(self, *args, **kwargs)
@@ -15,31 +20,36 @@ def check_auth(func):
 
 
 class IGClient:
-    STRF = "%Y-%m-%d %H:%M:%S"
-    cli_hooks = ['authd', 'get_positions']
-    def __init__(self, api_key: str) -> None:
+    STRF: str = "%Y-%m-%d %H:%M:%S"
+    cli_hooks: List[str] = ['authd', 'get_positions']
+
+    def __init__(self, api_key: str, demo: bool = False) -> None:
         self.logger = logging.getLogger(self.__class__.__name__)
         self.__api_key = api_key
         self._id = None
         self.__security_token = None
         self.__cst = None
-
-        self.base_url = 'https://demo-api.ig.com/gateway/deal'
+        if demo:
+            self.base_url = 'https://demo-api.ig.com/gateway/deal'
+        else:
+            self.base_url = 'https://api.ig.com/gateway/deal'
 
     @property
-    def authd(self):
-        if not self.__security_token is None and not self.__cst is None:
+    def authd(self) -> bool:
+        if self.__security_token is not None and self.__cst is not None:
             return True
         return False
 
-    def _get(self, method, endpoint, params={}, version=2):
+    def _get(self, method: Callable, endpoint: str,
+             params: Dict[str, str] = {},
+             version: int = 2) -> JSONType:
         assert method in ('get', 'delete')
         self.logger.debug(f'{method.upper}: {self.base_url+endpoint}')
         headers = self.get_headers()
         headers['VERSION'] = str(version)
         r = getattr(req, method)(self.base_url+endpoint,
-                    params=params,
-                    headers=headers)
+                                 params=params,
+                                 headers=headers)
         if r.ok:
             return r.json()
         try:
@@ -49,14 +59,17 @@ class IGClient:
         except json.JSONDecodeError:
             raise Exception(f'Error {r.status_code}: {r.content.decode()}')
 
-    def _post(self, method, endpoint, params={}, data={}, version=2):
+    def _post(self, method: Callable, endpoint: str,
+              params: JSONType = {}, data: JSONType = {},
+              version: int = 2) -> JSONType:
         assert method in ('post', 'put')
         self.logger.debug(f'{method.upper()}: {self.base_url+endpoint}')
         headers = self.get_headers()
         headers['VERSION'] = str(version)
         data = json.dumps(data)
         # weird json format fix
-        data = data.replace(': true', ': "true"').replace(': false', ': "false"')
+        data = data.replace(': true', ': "true"').replace(': false',
+                                                          ': "false"')
         r = getattr(req, method)(self.base_url+endpoint,
                                  params=params,
                                  data=data,
@@ -70,24 +83,34 @@ class IGClient:
         except json.JSONDecodeError:
             raise Exception(f'Error {r.status_code}: {r.content.decode()}')
 
-    def get(self, endpoint, params={}, version=2):
+    def get(self, endpoint: str,
+            params: JSONType = {},
+            version: int = 2) -> JSONType:
         return self._get('get', endpoint, params=params, version=version)
 
-    def delete(self, endpoint, params={}):
+    def delete(self, endpoint: str,
+               params: JSONType = {},
+               version: int = 2) -> JSONType:
         return self._get('delete', endpoint, params=params)
 
-    def post(self, endpoint, params={}, data={}):
+    def post(self, endpoint: str,
+             params: JSONType = {},
+             data: JSONType = {},
+             version: int = 2) -> JSONType:
         return self._post('post', endpoint, params=params, data=data)
 
-    def put(self, endpoint, params={}, data={}):
+    def put(self, endpoint: str,
+            params: JSONType = {},
+            data: JSONType = {},
+            version: int = 2) -> JSONType:
         return self._post('put', endpoint, params=params, data=data)
 
-    def get_headers(self):
+    def get_headers(self) -> Dict[str, str]:
         headers = {
             'User-Agent': 'IGAPIv2-Python (alpha)',
             'Content-Type': 'application/json; charset=UTF-8 ',
             'Accept': 'application/json; charset=UTF-8 ',
-            #'VERSION': '2',
+            # 'VERSION': '2',
             'X-IG-API-KEY': self.__api_key
         }
         if self.__security_token and self.__cst:
@@ -95,9 +118,11 @@ class IGClient:
             headers['CST'] = self.__cst
         return headers
 
-    def login(self, identifier, password):
-        data = json.dumps({'identifier':identifier, 'password':password})
-        r = req.post(self.base_url+'/session', headers=self.get_headers(), data=data)
+    def login(self, identifier: str, password: str) -> bool:
+        data = json.dumps({'identifier': identifier, 'password': password})
+        r = req.post(self.base_url+'/session',
+                     headers=self.get_headers(),
+                     data=data)
         if r.ok:
             self.__security_token = r.headers['X-SECURITY-TOKEN']
             self.__cst = r.headers['CST']
@@ -105,14 +130,14 @@ class IGClient:
             return True
         return False
 
-    def get_accounts(self):
+    def get_accounts(self) -> JSONType:
         return self.get('/accounts', version=1)
 
     @check_auth
-    def get_positions(self):
+    def get_positions(self) -> JSONType:
         return self.get('/positions')
 
-    def get_positions_profitloss(self):
+    def get_positions_profitloss(self) -> JSONType:
         positions = self.get_positions()['positions']
         for position in positions:
             if position['market']['marketStatus'] == 'CLOSED':
@@ -127,19 +152,31 @@ class IGClient:
         return positions
 
     @check_auth
-    def get_position(self, deal_id):
+    def get_position(self, deal_id: str) -> JSONType:
         return self.get(f'/positions/{deal_id}')
 
     @check_auth
-    def add_position(self, direction, order_type, epic, size, currency_code,
-                     level=None, expiry='-', deal_reference=None,
-                     force_open=True, guaranteed_stop=False,
-                     limit_distance=None, limit_level=None,
-                     stop_distance=None, stop_level=None,
-                     trailing_stop=None, trailing_stop_increment=None,
-                     time_in_force='FILL_OR_KILL', quote_id=None):
+    def add_position(self,
+                     direction: str, # BUY/SELL
+                     order_type: str, # LIMIT/MARGIN
+                     epic: str,
+                     size: float,
+                     currency_code: str,
+                     level: Union[float, None] = None,
+                     expiry: Union[datetime, None] = None,
+                     deal_reference: Union[str, None] = None,
+                     force_open: bool = True,
+                     guaranteed_stop: bool = False,
+                     limit_distance: Union[float, None] = None,
+                     limit_level=None,
+                     stop_distance=None,
+                     stop_level=None,
+                     trailing_stop=None,
+                     trailing_stop_increment=None,
+                     time_in_force='FILL_OR_KILL',
+                     quote_id=None) -> JSONType:
         data = {"epic": epic,
-                "expiry": expiry,
+                "expiry": expiry if expiry else '-',
                 "direction": direction,
                 "size": size,
                 "orderType": order_type,
@@ -158,19 +195,19 @@ class IGClient:
         return self.post('/positions/otc', data=data)
 
     @check_auth
-    def get_activity(self):
+    def get_activity(self) -> JSONType:
         return self.get('/history/activity')
 
     @check_auth
-    def get_last_activity(self):
+    def get_last_activity(self) -> JSONType:
         return self.get_activity()['activities'][0]
 
     @check_auth
-    def get_transactions(self):
+    def get_transactions(self) -> JSONType:
         return self.get('/history/transactions')
 
     @check_auth
-    def get_working_orders(self):
+    def get_working_orders(self) -> JSONType:
         return self.get('/workingorders')
 
     @check_auth
@@ -181,7 +218,7 @@ class IGClient:
                           limit_distance=None, limit_level=None,
                           stop_distance=None, stop_level=None,
                           time_in_force='GOOD_TILL_CANCELLED',
-                          good_till_date=None,):
+                          good_till_date=None,) -> JSONType:
         data = {"epic": epic,
                 "expiry": expiry,
                 "direction": direction,
@@ -204,7 +241,7 @@ class IGClient:
                            limit_distance=None, limit_level=None,
                            stop_distance=None, stop_level=None,
                            time_in_force='GOOD_TILL_CANCELLED',
-                           good_till_date=None):
+                           good_till_date=None) -> JSONType:
         data = {"timeInForce": time_in_force,
                 "goodTillDate": good_till_date,
                 "stopLevel": stop_level,
@@ -216,27 +253,32 @@ class IGClient:
         return self.put(f'/workingorders/otc/{deal_id}', data=data)
 
     @check_auth
-    def delete_working_order(self, deal_id):
+    def delete_working_order(self, deal_id: str) -> JSONType:
         return self.delete(f'/workingorders/otc/{deal_id}')
 
     @check_auth
-    def get_markets(self, *args):
-        return self.get('/markets', params={'epics':','.join(args)})
+    def get_markets(self, *args: List[str]) -> JSONType:
+        return self.get('/markets', params={'epics': ','.join(args)})
 
     @check_auth
-    def get_market(self, epic):
+    def get_market(self, epic: str) -> JSONType:
         return self.get(f'/markets/{epic}')
 
     @check_auth
-    def search_market(self, term):
-        return self.get('/markets', params={'searchTerm':term}, version=1)
+    def search_market(self, term: str) -> JSONType:
+        return self.get('/markets', params={'searchTerm': term}, version=1)
 
     @check_auth
-    def get_prices(self, epic, resolution='DAY', num_points=100):
+    def get_prices(self, epic: str,
+                   resolution: str = 'DAY',
+                   num_points: int = 100) -> JSONType:
         return self.get(f'/prices/{epic}/{resolution}/{num_points}')
 
     @check_auth
-    def get_prices_date(self, epic, resolution='DAY', start_date=None, end_date=None):
+    def get_prices_date(self, epic: str,
+                        resolution: str = 'DAY',
+                        start_date: datetime = None,
+                        end_date: datetime = None) -> JSONType:
         now = datetime.utcnow()
         if not start_date:
             start_date = (now - timedelta(days=7)).strftime(self.STRF)
@@ -245,14 +287,14 @@ class IGClient:
         return self.get(f'/prices/{epic}/{resolution}/{start_date}/{end_date}')
 
     @check_auth
-    def get_client_sentiment(self, *args):
+    def get_client_sentiment(self, *args: List[str]) -> JSONType:
         params = {'marketIds': ",".join(args)}
         return self.get('/clientsentiment/', params=params)
 
     @check_auth
-    def get_client_sentiment_related(self, market_id):
+    def get_client_sentiment_related(self, market_id: str) -> JSONType:
         return self.get(f'/clientsentiment/related/{market_id}')
 
     @check_auth
-    def get_application(self):
+    def get_application(self) -> JSONType:
         return self.get('/operations/application', version=1)
