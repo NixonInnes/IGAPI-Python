@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Union
 
 from .exceptions import status_code_exceptions
 
+# Maybe this is a bit of a cop-out...
 JSONType = Union[List[str, int, float, list, dict, datetime],
                  Dict[str, Union[str, int, float, list, dict, datetime]]]
 
